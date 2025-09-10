@@ -38,6 +38,8 @@ const CodeToImageGenerator: FC = () => {
   const highlightedCodeRef = useRef<HTMLDivElement | null>(null);
   const editorTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [scriptsLoaded, setScriptsLoaded] = useState(false);
+  const [scriptsError, setScriptsError] = useState<string | null>(null);
+  const loadingRef = useRef<boolean>(false);
 
   const updateState = useCallback((updates: Partial<State>) => {
     setState((prev) => ({ ...prev, ...updates }));
@@ -79,32 +81,74 @@ const CodeToImageGenerator: FC = () => {
       "google-fonts-style"
     );
 
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+    setScriptsError(null);
+
     window.prettierPlugins = {};
-    Promise.all([
-      loadScript(
-        "https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.11/html-to-image.min.js"
-      ),
-      loadScript(
-        "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"
-      ),
-      loadScript("https://unpkg.com/prettier@2.8.8/standalone.js"),
-      loadScript("https://unpkg.com/prettier@2.8.8/parser-babel.js"),
-      loadScript("https://unpkg.com/prettier@2.8.8/parser-html.js"),
-      loadScript("https://unpkg.com/prettier@2.8.8/parser-postcss.js"),
-      loadScript("https://unpkg.com/prettier@2.8.8/parser-typescript.js"),
-    ])
+    
+    const scripts = [
+      {
+        name: "html-to-image",
+        url: "https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.11/html-to-image.min.js"
+      },
+      {
+        name: "highlight.js",
+        url: "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"
+      },
+      {
+        name: "prettier",
+        url: "https://unpkg.com/prettier@2.8.8/standalone.js"
+      },
+      {
+        name: "prettier-babel",
+        url: "https://unpkg.com/prettier@2.8.8/parser-babel.js"
+      },
+      {
+        name: "prettier-html",
+        url: "https://unpkg.com/prettier@2.8.8/parser-html.js"
+      },
+      {
+        name: "prettier-postcss",
+        url: "https://unpkg.com/prettier@2.8.8/parser-postcss.js"
+      },
+      {
+        name: "prettier-typescript",
+        url: "https://unpkg.com/prettier@2.8.8/parser-typescript.js"
+      }
+    ];
+
+    Promise.all(scripts.map(script => 
+      loadScript(script.url).catch(error => {
+        console.error(`Failed to load ${script.name}:`, error);
+        throw new Error(`Failed to load ${script.name}`);
+      })
+    ))
       .then(() => {
-        Promise.all(
+        // Load language-specific highlight.js modules
+        return Promise.all(
           Object.keys(LANGUAGES).map((lang) => {
             if (["javascript", "html", "css", "typescript"].includes(lang))
               return Promise.resolve();
             return loadScript(
               `https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/${lang}.min.js`
-            ).catch(() => {});
+            ).catch((error) => {
+              console.warn(`Optional language ${lang} failed to load:`, error);
+              // Don't throw for optional language modules
+            });
           })
-        ).then(() => setScriptsLoaded(true));
+        );
       })
-      .catch(console.error);
+      .then(() => {
+        setScriptsLoaded(true);
+        loadingRef.current = false;
+      })
+      .catch((error) => {
+        setScriptsError(error.message);
+        setScriptsLoaded(false);
+        loadingRef.current = false;
+        console.error("Failed to load required scripts:", error);
+      });
   }, []);
 
   useEffect(() => {
@@ -189,7 +233,18 @@ const CodeToImageGenerator: FC = () => {
   };
 
   const generateAndDownload = async (type: "png" | "clipboard") => {
-    if (!previewRef.current || !window.htmlToImage) return;
+    if (!previewRef.current) {
+      showNotification('Preview element not found');
+      return;
+    }
+    if (!window.htmlToImage) {
+      showNotification('Image generation library not loaded');
+      return;
+    }
+    if (isGenerating) {
+      showNotification('Image generation in progress');
+      return;
+    }
     setIsGenerating(true);
     try {
       // Get the exact content dimensions
@@ -199,7 +254,7 @@ const CodeToImageGenerator: FC = () => {
       // Get the actual content wrapper
       const contentWrapper = previewElement.querySelector(
         ".code-content-wrapper"
-      );
+      ) as HTMLDivElement;
       if (!contentWrapper) return;
 
       // Store original styles
@@ -233,11 +288,22 @@ const CodeToImageGenerator: FC = () => {
       if (!blob) throw new Error("Blob generation failed.");
 
       if (type === "clipboard") {
-        if (navigator.clipboard && typeof ClipboardItem !== "undefined") {
+        if (!navigator.clipboard) {
+          showNotification("Clipboard access not available in your browser");
+          return;
+        }
+        if (typeof ClipboardItem === "undefined") {
+          showNotification("Your browser doesn't support copying images to clipboard");
+          return;
+        }
+        try {
           await navigator.clipboard.write([
             new ClipboardItem({ "image/png": blob }),
           ]);
           showNotification("Image copied to clipboard!");
+        } catch (clipboardError) {
+          console.error("Clipboard write failed:", clipboardError);
+          showNotification("Failed to copy to clipboard. Try downloading instead.");
         }
       } else {
         const link = document.createElement("a");
@@ -297,6 +363,18 @@ const CodeToImageGenerator: FC = () => {
           </header>
           <div className="grid lg:grid-cols-3 gap-8">
             <div className="lg:col-span-2 space-y-8">
+              {scriptsError && (
+                <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+                  <p className="font-medium">Error loading required scripts</p>
+                  <p className="text-sm mt-1">{scriptsError}</p>
+                  <button 
+                    onClick={() => { loadingRef.current = false; window.location.reload(); }}
+                    className="mt-2 text-sm underline hover:no-underline"
+                  >
+                    Try reloading the page
+                  </button>
+                </div>
+              )}
               <section className="bg-white rounded-2xl shadow-md border border-gray-200 p-6">
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
@@ -409,6 +487,8 @@ const CodeToImageGenerator: FC = () => {
                           updateState({ language: e.target.value })
                         }
                         className="w-full p-2 border border-gray-300 rounded-md"
+                        title="Select programming language"
+                        aria-label="Programming language"
                       >
                         {Object.entries(LANGUAGES).map(([key, name]) => (
                           <option key={key} value={key}>
@@ -424,6 +504,8 @@ const CodeToImageGenerator: FC = () => {
                           updateState({ fontFamily: e.target.value })
                         }
                         className="w-full p-2 border border-gray-300 rounded-md"
+                        title="Select font family"
+                        aria-label="Font family"
                       >
                         {FONT_FAMILIES.map((font) => (
                           <option
@@ -448,6 +530,8 @@ const CodeToImageGenerator: FC = () => {
                           updateState({ padding: +e.target.value })
                         }
                         className="w-full"
+                        title={`Adjust padding: ${state.padding}px`}
+                        aria-label="Adjust padding"
                       />
                     </ControlGroup>
                     <ControlGroup label={`Font Size (${state.fontSize}px)`}>
@@ -460,6 +544,8 @@ const CodeToImageGenerator: FC = () => {
                           updateState({ fontSize: +e.target.value })
                         }
                         className="w-full"
+                        title={`Adjust font size: ${state.fontSize}px`}
+                        aria-label="Adjust font size"
                       />
                     </ControlGroup>
                     <ControlGroup
@@ -474,6 +560,8 @@ const CodeToImageGenerator: FC = () => {
                           updateState({ borderRadius: +e.target.value })
                         }
                         className="w-full"
+                        title={`Adjust border radius: ${state.borderRadius}px`}
+                        aria-label="Adjust border radius"
                       />
                     </ControlGroup>
                   </div>
@@ -501,6 +589,8 @@ const CodeToImageGenerator: FC = () => {
                       value={state.shadow}
                       onChange={(e) => updateState({ shadow: e.target.value })}
                       className="w-full p-2 border border-gray-300 rounded-md mt-2"
+                      title="Select shadow size"
+                      aria-label="Shadow size"
                     >
                       {Object.entries(SHADOW_PRESETS).map(([key, name]) => (
                         <option key={key} value={key}>
@@ -518,6 +608,7 @@ const CodeToImageGenerator: FC = () => {
                           updateState({ showWindowControls: e.target.checked })
                         }
                         className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                        aria-label="Toggle window controls"
                       />{" "}
                       Show window controls
                     </label>
@@ -529,6 +620,7 @@ const CodeToImageGenerator: FC = () => {
                           updateState({ showLineNumbers: e.target.checked })
                         }
                         className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                        aria-label="Toggle line numbers"
                       />{" "}
                       Show line numbers
                     </label>
@@ -541,6 +633,9 @@ const CodeToImageGenerator: FC = () => {
                             updateState({ windowTitle: e.target.value })
                           }
                           className="w-full p-2 border border-gray-300 rounded-md"
+                          placeholder="Enter window title"
+                          title="Window title"
+                          aria-label="Window title"
                         />
                       </ControlGroup>
                     )}
